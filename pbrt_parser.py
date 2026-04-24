@@ -54,7 +54,14 @@ def mat_rotate(angle_deg, ax, ay, az):
             0,            0,            0,             1]
 
 def mat_lookat(ex, ey, ez, lx, ly, lz, ux, uy, uz):
-    """pbrt LookAt → camera-to-world (column-major)."""
+    """
+    pbrt LookAt → **world-to-camera** matrix (column-major).
+
+    pbrt's convention: LookAt sets the CTM to the world-to-camera transform.
+    We first build camera-to-world (C2W), then return its inverse.
+    Since the 3×3 rotation part of C2W is orthonormal, the inverse is simply
+    transpose(rotation) with an adjusted translation column.
+    """
     ddx,ddy,ddz = lx-ex,ly-ey,lz-ez
     l = math.sqrt(ddx*ddx+ddy*ddy+ddz*ddz)
     if l < 1e-12: return mat_identity()
@@ -65,10 +72,21 @@ def mat_lookat(ex, ey, ez, lx, ly, lz, ux, uy, uz):
     rl=math.sqrt(rx*rx+ry*ry+rz*rz)
     if rl>1e-12: rx/=rl; ry/=rl; rz/=rl
     nux=ddy*rz-ddz*ry; nuy=ddz*rx-ddx*rz; nuz=ddx*ry-ddy*rx
-    return [rx,  ry,  rz,  0,
-            nux, nuy, nuz, 0,
-            ddx, ddy, ddz, 0,
-            ex,  ey,  ez,  1]
+
+    # camera-to-world columns: [right | newUp | dir | eye]
+    # world-to-camera = inverse(C2W)
+    # For orthonormal R: inv(R) = R^T, and t' = -R^T * eye
+    tx = -(rx*ex + ry*ey + rz*ez)
+    ty = -(nux*ex + nuy*ey + nuz*ez)
+    tz = -(ddx*ex + ddy*ey + ddz*ez)
+
+    # Column-major world-to-camera: rows of C2W rotation become columns
+    return [
+        rx,  nux, ddx, 0,
+        ry,  nuy, ddy, 0,
+        rz,  nuz, ddz, 0,
+        tx,  ty,  tz,  1,
+    ]
 
 # ---------------------------------------------------------------------------
 # Tokeniser

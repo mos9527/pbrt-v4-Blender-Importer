@@ -275,8 +275,12 @@ def _build_camera(cam_data, import_name, root_col, correction):
         cam.dof.focus_distance = cam_data['focaldistance'] * scale
 
     obj = _new_object(cam_name, cam, root_col)
-    # pbrt CTM is camera-to-world; apply coord correction then flip forward axis
-    obj.matrix_world = correction @ _pbrt_mat_to_blender(cam_data['ctm']) @ _CAM_FLIP
+    # CTM is world-to-camera (pbrt convention).  Invert to get camera-to-world,
+    # apply coord-system correction (Y-up → Z-up + scale), then flip the
+    # camera forward axis (pbrt +Z → Blender -Z).
+    w2c = _pbrt_mat_to_blender(cam_data['ctm'])
+    c2w = w2c.inverted()
+    obj.matrix_world = correction @ c2w @ _CAM_FLIP
 
     scene = bpy.context.scene
     scene.render.resolution_x = xres
