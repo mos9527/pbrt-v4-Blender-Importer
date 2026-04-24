@@ -1,0 +1,341 @@
+"""
+Blender scene builder
+=====================
+Converts a :class:`pbrt_parser.SceneData` into Blender objects.
+
+Geometry
+--------
+  plymesh      → ``bpy.ops.wm.ply_import`` (Blender 4.x) /
+                  ``bpy.ops.import_mesh.ply`` (Blender 3.x)
+  trianglemesh → ``bpy.data.meshes`` via ``from_pydata``
+  loopsubdiv   → same as trianglemesh + Subdivision Surface modifier
+  sphere       → UV sphere (bmesh)
+  disk         → filled circle (bmesh)
+
+Instancing
+----------
+  ObjectBegin/End → hidden ``bpy.data.collections``
+  ObjectInstance  → Empty with ``instance_type = 'COLLECTION'``
+
+Materials
+---------
+  Each unique pbrt material name becomes one ``bpy.data.material`` with a
+  default Principled BSDF node tree.  No shading parameters are mapped —
+  the materials are named placeholders ready for manual editing.
+
+Camera
+------
+  A single perspective camera is created and set as the active scene camera.
+  Resolution is applied to ``scene.render.resolution_x/y``.
+
+Coordinate system
+-----------------
+  pbrt uses a right-handed, Y-up system; Blender uses right-handed, Z-up.
+  The root collection empty carries a 90° X-rotation so all child objects
+  are correctly oriented without baking the correction into every matrix.
+"""
+
+import os
+import math
+import bpy
+import bmesh
+from mathutils import Matrix
+
+
+# ---------------------------------------------------------------------------
+# Coordinate-system constants
+# ---------------------------------------------------------------------------
+
+# pbrt Y-up → Blender Z-up
+_PBRT_TO_BLENDER = Matrix.Rotation(math.radians(90), 4, 'X')
+
+# pbrt camera looks down +Z; Blender camera looks down -Z
+_CAM_FLIP = Matrix.Rotation(math.radians(180), 4, 'Y')
+
+
+# ---------------------------------------------------------------------------
+# Matrix conversion
+# ---------------------------------------------------------------------------
+
+def _pbrt_mat_to_blender(m16):
+    """Convert a pbrt column-major 16-float list to a Blender ``Matrix``."""
+    rows = [[m16[row + col*4] for col in range(4)] for row in range(4)]
+    return Matrix(rows)
+
+
+# ---------------------------------------------------------------------------
+# Collection / object helpers
+# ---------------------------------------------------------------------------
+
+def _ensure_collection(name, parent_col):
+    if name in bpy.data.collections:
+        return bpy.data.collections[name]
+    col = bpy.data.collections.new(name)
+    parent_col.children.link(col)
+    return col
+
+
+def _new_object(name, data, collection):
+    obj = bpy.data.objects.new(name, data)
+    collection.objects.link(obj)
+    return obj
+
+
+# ---------------------------------------------------------------------------
+# Material helpers
+# ---------------------------------------------------------------------------
+
+def _get_or_create_material(mat_name):
+    """
+    Return a material named *mat_name*, creating it (with a default
+    Principled BSDF) if it does not yet exist.  Returns ``None`` when
+    *mat_name* is empty.
+    """
+    if not mat_name:
+        return None
+    if mat_name in bpy.data.materials:
+        return bpy.data.materials[mat_name]
+    mat = bpy.data.materials.new(name=mat_name)
+    mat.use_nodes = True   # default tree = Principled BSDF + Material Output
+    return mat
+
+
+def _assign_material(obj, mat_name):
+    """Assign *mat_name* to *obj*'s first material slot."""
+    if obj is None or obj.type != 'MESH':
+        return
+    mat = _get_or_create_material(mat_name)
+    if mat is None:
+        return
+    if obj.data.materials:
+        obj.data.materials[0] = mat
+    else:
+        obj.data.materials.append(mat)
+
+
+# ---------------------------------------------------------------------------
+# Mesh builders
+# ---------------------------------------------------------------------------
+
+def _build_trianglemesh(params, name):
+    pts = params.get('P', [])
+    idx = params.get('indices', [])
+    if len(pts) < 3 or len(idx) < 3:
+        return None
+    verts = [(pts[i], pts[i+1], pts[i+2]) for i in range(0, len(pts), 3)]
+    faces = [(idx[i], idx[i+1], idx[i+2]) for i in range(0, len(idx), 3)]
+    me = bpy.data.meshes.new(name)
+    me.from_pydata(verts, [], faces)
+    me.update()
+    return me
+
+
+def _build_sphere(params, name):
+    radius = params.get('radius', [1.0])[0]
+    me = bpy.data.meshes.new(name)
+    bm = bmesh.new()
+    bmesh.ops.create_uvsphere(bm, u_segments=32, v_segments=16, radius=radius)
+    bm.to_mesh(me); bm.free(); me.update()
+    return me
+
+
+def _build_disk(params, name):
+    radius = params.get('radius', [1.0])[0]
+    me = bpy.data.meshes.new(name)
+    bm = bmesh.new()
+    bmesh.ops.create_circle(bm, cap_ends=True, cap_tris=False,
+                             segments=32, radius=radius)
+    bm.to_mesh(me); bm.free(); me.update()
+    return me
+
+
+def _import_plymesh(params, name, base_dir, collection):
+    fn_list = params.get('filename', [])
+    if not fn_list:
+        return None
+    fpath = os.path.normpath(os.path.join(base_dir, fn_list[0]))
+    if not os.path.isfile(fpath):
+        print(f"[pbrt_builder] PLY not found: {fpath}")
+        return None
+
+    bpy.ops.object.select_all(action='DESELECT')
+    try:
+        bpy.ops.wm.ply_import(filepath=fpath)          # Blender 4.x
+    except AttributeError:
+        bpy.ops.import_mesh.ply(filepath=fpath)         # Blender 3.x
+
+    imported = bpy.context.selected_objects
+    if not imported:
+        return None
+
+    obj = imported[0]
+    obj.name = name
+    for col in list(obj.users_collection):
+        col.objects.unlink(obj)
+    collection.objects.link(obj)
+    return obj
+
+
+# ---------------------------------------------------------------------------
+# Shape dispatcher
+# ---------------------------------------------------------------------------
+
+def _shape_to_object(shape_node, idx, base_dir, collection):
+    st       = shape_node.shape_type
+    name     = f"{st}_{idx:04d}"
+    world    = _pbrt_mat_to_blender(shape_node.world_matrix)
+    mat_name = shape_node.material_name
+
+    if st == 'plymesh':
+        obj = _import_plymesh(shape_node.params, name, base_dir, collection)
+        if obj:
+            obj.matrix_world = world
+            _assign_material(obj, mat_name)
+        return obj
+
+    if st in ('trianglemesh', 'loopsubdiv'):
+        me = _build_trianglemesh(shape_node.params, name)
+        if me is None:
+            return None
+        obj = _new_object(name, me, collection)
+        obj.matrix_world = world
+        _assign_material(obj, mat_name)
+        if st == 'loopsubdiv':
+            levels = int(shape_node.params.get('levels', [2])[0])
+            mod = obj.modifiers.new('Subdivision', 'SUBSURF')
+            mod.levels = mod.render_levels = levels
+        return obj
+
+    if st == 'sphere':
+        obj = _new_object(name, _build_sphere(shape_node.params, name), collection)
+        obj.matrix_world = world
+        _assign_material(obj, mat_name)
+        return obj
+
+    if st == 'disk':
+        obj = _new_object(name, _build_disk(shape_node.params, name), collection)
+        obj.matrix_world = world
+        _assign_material(obj, mat_name)
+        return obj
+
+    print(f"[pbrt_builder] Unsupported shape type: {st}")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Camera builder
+# ---------------------------------------------------------------------------
+
+def _fov_to_angle_y(fov_deg, fov_axis, xres, yres):
+    """
+    Convert pbrt fov + fovaxis to Blender vertical FOV (radians).
+
+    pbrt's ``fovaxis`` values: ``"x"`` | ``"y"`` | ``"diagonal"`` | ``"smaller"``
+    (``"smaller"`` is the default for non-square renders in pbrt-v4).
+    """
+    fov = math.radians(fov_deg)
+    aspect = xres / yres if yres else 1.0
+
+    if fov_axis == 'x':
+        return 2 * math.atan(math.tan(fov / 2) / aspect)
+    if fov_axis == 'y':
+        return fov
+    if fov_axis == 'diagonal':
+        diag = math.sqrt(1 + aspect**2)
+        return 2 * math.atan(math.tan(fov / 2) / diag)
+    # 'smaller': the fov applies to whichever axis is smaller
+    if xres <= yres:
+        return 2 * math.atan(math.tan(fov / 2) / aspect)
+    return fov
+
+
+def _build_camera(cam_data, import_name, root_col):
+    xres = cam_data['xresolution']
+    yres = cam_data['yresolution']
+
+    cam_name = import_name + "_camera"
+    if cam_name in bpy.data.cameras:
+        bpy.data.cameras.remove(bpy.data.cameras[cam_name])
+
+    cam = bpy.data.cameras.new(cam_name)
+    cam.type      = 'PERSP'
+    cam.lens_unit = 'FOV'
+    cam.angle     = _fov_to_angle_y(cam_data['fov'], cam_data['fov_axis'], xres, yres)
+
+    if cam_data['lensradius'] > 0:
+        cam.dof.use_dof        = True
+        cam.dof.focus_distance = cam_data['focaldistance']
+
+    obj = _new_object(cam_name, cam, root_col)
+    # pbrt CTM is camera-to-world; apply Y-up→Z-up then flip camera forward axis
+    obj.matrix_world = _PBRT_TO_BLENDER @ _pbrt_mat_to_blender(cam_data['ctm']) @ _CAM_FLIP
+
+    scene = bpy.context.scene
+    scene.render.resolution_x = xres
+    scene.render.resolution_y = yres
+    scene.camera = obj
+
+    print(f"[pbrt_builder] Camera: fov={cam_data['fov']}° ({cam_data['fov_axis']}), {xres}×{yres}")
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+def build_scene(scene_data, base_dir, import_name="pbrt_import"):
+    """
+    Build Blender objects from *scene_data*.
+
+    Parameters
+    ----------
+    scene_data  : pbrt_parser.SceneData
+    base_dir    : str  — directory of the top-level .pbrt file
+    import_name : str  — name prefix for all created data-blocks
+    """
+    root_col = _ensure_collection(import_name, bpy.context.scene.collection)
+
+    # Root empty carries the Y-up → Z-up correction for the whole import
+    root_empty = bpy.data.objects.new(import_name + "_root", None)
+    root_empty.matrix_world = _PBRT_TO_BLENDER
+    root_col.objects.link(root_empty)
+
+    # ObjectBegin prototypes → hidden collections
+    defs_col = _ensure_collection(import_name + "_defs", root_col)
+    defs_col.hide_viewport = True
+    defs_col.hide_render   = True
+
+    obj_collections = {}
+    for obj_name, obj_def in scene_data.objects.items():
+        ocol = _ensure_collection(obj_name.replace(' ', '_'), defs_col)
+        for i, shape in enumerate(obj_def.shapes):
+            _shape_to_object(shape, i, base_dir, ocol)
+        obj_collections[obj_name] = ocol
+
+    # Top-level shapes
+    shapes_col = _ensure_collection(import_name + "_shapes", root_col)
+    for i, shape in enumerate(scene_data.shapes):
+        _shape_to_object(shape, i, base_dir, shapes_col)
+
+    # ObjectInstance → collection-instance empties
+    inst_col = _ensure_collection(import_name + "_instances", root_col)
+    for i, inst in enumerate(scene_data.instances):
+        ocol = obj_collections.get(inst.object_name)
+        if ocol is None:
+            print(f"[pbrt_builder] ObjectInstance '{inst.object_name}' not defined — skipped")
+            continue
+        empty = bpy.data.objects.new(
+            f"inst_{inst.object_name.replace(' ', '_')}_{i:04d}", None)
+        empty.empty_display_type  = 'PLAIN_AXES'
+        empty.instance_type       = 'COLLECTION'
+        empty.instance_collection = ocol
+        empty.matrix_world        = _pbrt_mat_to_blender(inst.world_matrix)
+        inst_col.objects.link(empty)
+
+    # Camera
+    if scene_data.camera:
+        _build_camera(scene_data.camera, import_name, root_col)
+
+    print(f"[pbrt_builder] Done — "
+          f"{len(scene_data.shapes)} shapes, "
+          f"{len(scene_data.objects)} object defs, "
+          f"{len(scene_data.instances)} instances.")
