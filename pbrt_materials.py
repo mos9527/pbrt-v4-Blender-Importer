@@ -351,8 +351,6 @@ def _apply_dielectric(bsdf, params, textures, base_dir):
     _set_input(bsdf, 'Roughness', float(roughness))
     eta = _resolve_glass_ior(params.get('eta', [1.5]))
     _set_input(bsdf, 'IOR', eta)
-    # Make material fully transparent visually
-    bsdf.id_data.blend_method = 'HASHED'
 
 
 def _apply_thindielectric(bsdf, params, textures, base_dir):
@@ -387,7 +385,6 @@ def _apply_diffusetransmission(bsdf, params, textures, base_dir):
         _set_input(bsdf, 'Base Color', (*trans[:3], 1.0))
     elif refl and len(refl) >= 3:
         _set_input(bsdf, 'Base Color', (*refl[:3], 1.0))
-    bsdf.id_data.blend_method = 'HASHED'
 
 
 def _apply_hair(bsdf, params, textures, base_dir):
