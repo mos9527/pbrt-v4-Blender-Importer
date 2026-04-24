@@ -259,8 +259,13 @@ class _Parser:
             else:
                 raw = [self.next()]
 
-            if ptype in ('float', 'integer', 'point2', 'point3',
-                         'normal3', 'vector2', 'vector3'):
+            if ptype == 'integer':
+                try:
+                    params[pname] = [int(x) for x in raw]
+                except ValueError:
+                    params[pname] = raw
+            elif ptype in ('float', 'point2', 'point3',
+                           'normal3', 'vector2', 'vector3'):
                 try:
                     params[pname] = [float(x) for x in raw]
                 except ValueError:

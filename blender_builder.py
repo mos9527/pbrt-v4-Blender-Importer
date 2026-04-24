@@ -123,7 +123,7 @@ def _build_trianglemesh(params, name):
     if len(pts) < 3 or len(idx) < 3:
         return None
     verts = [(pts[i], pts[i+1], pts[i+2]) for i in range(0, len(pts), 3)]
-    faces = [(idx[i], idx[i+1], idx[i+2]) for i in range(0, len(idx), 3)]
+    faces = [(int(idx[i]), int(idx[i+1]), int(idx[i+2])) for i in range(0, len(idx), 3)]
     me = bpy.data.meshes.new(name)
     me.from_pydata(verts, [], faces)
     me.update()
