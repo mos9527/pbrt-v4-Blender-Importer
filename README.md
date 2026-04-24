@@ -1,10 +1,12 @@
 pbrt-v4-Blender-Importer
 ===
+**ATTENTION:** Mostly genereated by Claude Code. Use at your own discretion.
+
 pbrt v4 scene importer for Blender.
 
 Supports geometry, instancing, materials and camera from [pbrt-v4](https://github.com/mmp/pbrt-v4) scene files.
 
-Tested against the [pbrt-v4-scenes](https://github.com/mmp/pbrt-v4-scenes) collection (killeroos, transparent-machines).
+Tested against a subset of the [pbrt-v4-scenes](https://github.com/mmp/pbrt-v4-scenes) collection (killeroos, transparent-machines, watercolor).
 
 Features
 ---

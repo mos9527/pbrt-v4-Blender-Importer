@@ -27,6 +27,17 @@ import re
 def mat_identity():
     return [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]
 
+def mat_from_pbrt_rowmajor(m16):
+    """
+    pbrt Transform/ConcatTransform supply 16 values in row-major order.
+    Internally we store matrices in column-major order (same as pbrt's C++
+    runtime and OpenGL).  Transpose converts between the two.
+    """
+    return [m16[0],m16[4],m16[8], m16[12],
+            m16[1],m16[5],m16[9], m16[13],
+            m16[2],m16[6],m16[10],m16[14],
+            m16[3],m16[7],m16[11],m16[15]]
+
 def mat_mul(a, b):
     r = [0.0] * 16
     for row in range(4):
@@ -408,10 +419,10 @@ class _Parser:
             self._apply(mat_rotate(angle,ax,ay,az))
 
         elif d == 'Transform':
-            self.ctm_stack[-1] = _parse_floats(self.next())
+            self.ctm_stack[-1] = mat_from_pbrt_rowmajor(_parse_floats(self.next()))
 
         elif d == 'ConcatTransform':
-            self._apply(_parse_floats(self.next()))
+            self._apply(mat_from_pbrt_rowmajor(_parse_floats(self.next())))
 
         elif d == 'LookAt':
             nums = []

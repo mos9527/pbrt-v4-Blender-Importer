@@ -54,6 +54,9 @@ _CAM_FLIP        = Matrix.Rotation(math.radians(180), 4, 'Y')
 # ---------------------------------------------------------------------------
 
 def _pbrt_mat_to_blender(m16):
+    # m16 is stored column-major (as built by pbrt_parser matrix helpers).
+    # Mathutils Matrix([[row0],[row1],...]) is row-major, so we transpose:
+    # element at blender row r, col c  =  m16[r + c*4]
     rows = [[m16[row + col*4] for col in range(4)] for row in range(4)]
     return Matrix(rows)
 
@@ -127,6 +130,76 @@ def _build_trianglemesh(params, name):
     me = bpy.data.meshes.new(name)
     me.from_pydata(verts, [], faces)
     me.update()
+
+    # UV coordinates — pbrt uses "uv" or "st", stored as flat [u0,v0, u1,v1, ...]
+    # one pair per vertex (indexed by the same indices array).
+    raw_uv = params.get('uv', params.get('st', []))
+    if len(raw_uv) >= 2:
+        uv_layer = me.uv_layers.new(name='UVMap')
+        loop_uvs = uv_layer.data
+        for loop in me.loops:
+            vi = loop.vertex_index
+            u = raw_uv[vi * 2]     if vi * 2     < len(raw_uv) else 0.0
+            v = raw_uv[vi * 2 + 1] if vi * 2 + 1 < len(raw_uv) else 0.0
+            loop_uvs[loop.index].uv = (u, v)
+
+    return me
+
+
+def _build_bilinearmesh(params, name):
+    """
+    pbrt bilinearmesh: 4 vertices per patch, arranged as a 2×2 grid.
+    Vertex order within each patch: [00, 10, 01, 11]  (u-major, then v).
+    We tessellate each patch into 2 triangles.
+
+    UV: pbrt supplies one (u,v) pair per unique vertex.  When absent we
+    generate a simple [0,0 1,0 0,1 1,1] per patch.
+    """
+    pts = params.get('P', [])
+    if len(pts) < 12:   # need at least one patch (4 verts × 3 floats)
+        return None
+
+    n_patches = len(pts) // 12
+    raw_uv    = params.get('uv', params.get('st', []))
+    raw_idx   = params.get('indices', [])  # optional per-patch vertex indices
+
+    verts = [(pts[i], pts[i+1], pts[i+2]) for i in range(0, len(pts), 3)]
+    faces = []
+    uv_per_vert = []  # parallel to verts
+
+    if raw_uv:
+        uv_per_vert = [(raw_uv[i], raw_uv[i+1]) for i in range(0, len(raw_uv), 2)]
+    else:
+        # Default UV: replicate [0,0 1,0 0,1 1,1] for every 4 vertices
+        default_patch_uv = [(0.0,0.0),(1.0,0.0),(0.0,1.0),(1.0,1.0)]
+        uv_per_vert = default_patch_uv * (len(verts) // 4 + 1)
+
+    if raw_idx:
+        # Explicit patch indices: 4 indices per patch
+        for p in range(n_patches):
+            i00, i10, i01, i11 = (int(raw_idx[p*4+k]) for k in range(4))
+            faces.append((i00, i10, i11))
+            faces.append((i00, i11, i01))
+    else:
+        # Implicit: vertices are laid out 4 per patch in order
+        for p in range(n_patches):
+            base = p * 4
+            i00, i10, i01, i11 = base, base+1, base+2, base+3
+            faces.append((i00, i10, i11))
+            faces.append((i00, i11, i01))
+
+    me = bpy.data.meshes.new(name)
+    me.from_pydata(verts, [], faces)
+    me.update()
+
+    if uv_per_vert:
+        uv_layer = me.uv_layers.new(name='UVMap')
+        loop_uvs = uv_layer.data
+        for loop in me.loops:
+            vi = loop.vertex_index
+            if vi < len(uv_per_vert):
+                loop_uvs[loop.index].uv = uv_per_vert[vi]
+
     return me
 
 
@@ -210,6 +283,15 @@ def _shape_to_object(shape_node, idx, base_dir, collection, correction,
             levels = int(shape_node.params.get('levels', [2])[0])
             mod = obj.modifiers.new('Subdivision', 'SUBSURF')
             mod.levels = mod.render_levels = levels
+        return obj
+
+    if st == 'bilinearmesh':
+        me = _build_bilinearmesh(shape_node.params, name)
+        if me is None:
+            return None
+        obj = _new_object(name, me, collection)
+        obj.matrix_world = world
+        _assign(obj)
         return obj
 
     if st == 'sphere':

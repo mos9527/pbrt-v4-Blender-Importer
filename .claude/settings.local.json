@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 *)",
+      "Bash(cat)",
+      "Read(//tmp/**)",
+      "Bash(awk '{print \" \" $9 \" \\(\" $5 \"\\)\"}')",
+      "Bash(awk '{print \"  \" $1}')",
+      "WebFetch(domain:pbrt.org)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
+    ]
+  }
+}

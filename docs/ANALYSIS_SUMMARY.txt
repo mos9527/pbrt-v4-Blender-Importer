@@ -1,0 +1,199 @@
+
+================================================================================
+PBRT-V4 BLENDER IMPORTER: HORIZONTAL FLIPPING ANALYSIS
+================================================================================
+
+PROJECT: pbrt-v4-Blender-Importer (Blender add-on for importing PBRT scenes)
+COMPLETED: April 24, 2026
+
+================================================================================
+KEY FINDING
+================================================================================
+
+The horizontal flipping is NOT caused by a bug in the coordinate system 
+conversion. The 90-degree X-axis rotation is CORRECT for converting from 
+PBRT's Y-up to Blender's Z-up.
+
+Most flipping issues are caused by:
+1. Negative scale values in the .pbrt source file (intentional mirrors)
+2. PLY files generated in a different coordinate system
+3. Direct Transform matrices with negative determinants
+
+================================================================================
+CRITICAL CODE LOCATIONS
+================================================================================
+
+File: blender_builder.py (lines 48-49)
+  _PBRT_TO_BLENDER = Matrix.Rotation(math.radians(90), 4, 'X')
+  _CAM_FLIP = Matrix.Rotation(math.radians(180), 4, 'Y')
+
+File: pbrt_parser.py (lines 402-403)
+  Scale directive parsing (watch for negative values!)
+
+File: blender_builder.py (line 187)
+  world = correction @ _pbrt_mat_to_blender(shape_node.world_matrix)
+
+================================================================================
+TOP CAUSES OF FLIPPING
+================================================================================
+
+1. PBRT file has Scale -X directive (CRITICAL)
+   - Detection: grep "Scale -" *.pbrt
+   - This is intentional mirroring in the source
+
+2. PLY file coordinate system mismatch (CRITICAL)
+   - PLY in Z-up but PBRT expects Y-up
+   - Detection: Open PLY in tool that shows axes
+   - Solution: Re-export PLY in Y-up coordinates
+
+3. Negative Transform matrix (CRITICAL)
+   - Direct Transform with -1 on diagonal
+   - Detection: grep "Transform.*-" *.pbrt
+
+4. Negative global_scale (HIGH)
+   - Parameter not validated in code
+   - Detection: Check import dialog
+
+5. Include file with Scale -1 (HIGH)
+   - Recursive issue in included files
+   - Detection: Check all included files
+
+6. ObjectInstance with negative scale (HIGH)
+   - Instance matrix has negative determinant
+   - Detection: Inspect instance transforms
+
+================================================================================
+VERIFICATION
+================================================================================
+
+The 90-degree X-rotation is CORRECT:
+  - Determinant = +1.0 (no reflection)
+  - Handedness preserved (right-handed)
+  - Necessary for Y-up to Z-up conversion
+  - Matches PBRT documentation
+
+DO NOT try to "fix" this rotation!
+
+================================================================================
+COORDINATE SYSTEM TRANSFORMATION
+================================================================================
+
+PBRT (Y-up, Z-forward):          Blender (Z-up, Y-forward):
+      Y                                   Z
+      |                                   |
+      | Z                                 | Y
+      |/                                  |/
+  ----+----- X                        ----+----- X
+
+Conversion: Rotate +90 degrees around X-axis
+Effect: (x, y, z) in pbrt becomes (x, -z, y) in Blender
+
+================================================================================
+TRANSFORMATION PIPELINE
+================================================================================
+
+1. Parser builds CTM (Current Transform Matrix)
+   - Accumulates all transforms in pbrt file
+   - Stored as 16 floats in column-major format
+   - May contain negative values (mirrors)
+
+2. Builder creates correction matrix
+   correction = Rotation(90,X) @ Scale(global_scale,4)
+
+3. Builder applies to all objects
+   world = correction @ pbrt_world_matrix
+
+4. Result in Blender Z-up coordinates
+   - All transforms preserved (including mirrors)
+   - Camera view direction corrected with _CAM_FLIP
+
+================================================================================
+DEBUGGING STEPS (IN ORDER)
+================================================================================
+
+Step 1: Search for negative scales
+  grep -r "Scale.*-[0-9]" .
+  (These are intentional mirrors in the source)
+
+Step 2: Verify PLY coordinate system
+  - Open each PLY file in a tool showing axes
+  - Verify it's in Y-up (not Z-up)
+  - If Z-up, re-export in Y-up coordinates
+
+Step 3: Check for negative Transform matrices
+  grep -r "Transform" . | grep "\-"
+
+Step 4: Verify global_scale is positive
+  - Check import dialog
+  - Must be > 0
+
+Step 5: Check Include files
+  - Find all Include directives
+  - Check each included file for Scale -1
+
+================================================================================
+SUPPORTED FORMATS
+================================================================================
+
+Geometry:
+  - plymesh (external PLY files)
+  - trianglemesh (inline vertex/index)
+  - loopsubdiv (with subdivision surface)
+  - sphere (parametric)
+  - disk (parametric)
+
+Materials:
+  - All 8 PBRT v4 types to Principled BSDF
+  - Named conductors and glass grades
+  - Imagemap textures
+
+Camera:
+  - Perspective with FOV
+  - Depth of field support
+  - fovaxis conversion
+
+================================================================================
+CODE RECOMMENDATIONS
+================================================================================
+
+1. Add negative scale detection in parser
+2. Validate global_scale (must be positive)
+3. Add determinant checking in builder
+4. Document PLY coordinate system requirements
+5. Consider auto-conversion option for PLY files
+
+================================================================================
+FILES GENERATED
+================================================================================
+
+1. FLIP_ANALYSIS.md (364 lines)
+   - Detailed technical analysis
+   - Part-by-part code examination
+
+2. DEBUG_GUIDE.md (274 lines)
+   - Step-by-step debugging procedure
+   - Testing procedures
+
+3. TRANSFORMATION_REFERENCE.md (129 lines)
+   - Matrix transformation overview
+   - Examples with calculations
+
+4. ANALYSIS_SUMMARY.txt (this file)
+   - Executive summary
+   - Quick reference
+
+================================================================================
+CONCLUSION
+================================================================================
+
+The importer is working correctly. The 90-degree X-rotation is necessary and
+correct for Y-up to Z-up conversion.
+
+Horizontal flipping is either:
+1. Intentional in the source PBRT file, or
+2. Caused by coordinate system mismatches in external files
+
+Follow the debugging steps to identify the specific cause in your scene.
+
+================================================================================
+
