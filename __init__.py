@@ -13,7 +13,7 @@ Supports Blender 3.6 and 4.x.
 bl_info = {
     "name":        "pbrt v4 Importer",
     "author":      "mos9527",
-    "version":     (1, 0, 0),
+    "version":     (1, 1, 0),
     "blender":     (3, 6, 0),
     "location":    "File > Import > pbrt v4 Scene (.pbrt)",
     "description": "Import geometry, instancing, materials and camera from a pbrt v4 scene file",
@@ -35,7 +35,7 @@ if _addon_dir not in sys.path:
 
 
 def _reload_modules():
-    for name in ('pbrt_parser', 'blender_builder'):
+    for name in ('pbrt_parser', 'pbrt_materials', 'blender_builder'):
         if name in sys.modules:
             importlib.reload(sys.modules[name])
 

@@ -19,9 +19,8 @@ Instancing
 
 Materials
 ---------
-  Each unique pbrt material name becomes one ``bpy.data.material`` with a
-  default Principled BSDF node tree.  No shading parameters are mapped —
-  the materials are named placeholders ready for manual editing.
+  Each unique pbrt material becomes one Blender material with a fully
+  configured Principled BSDF.  See :mod:`pbrt_materials` for the mapping.
 
 Camera
 ------
@@ -33,11 +32,6 @@ Coordinate system
   pbrt uses a right-handed, Y-up system; Blender uses right-handed, Z-up.
   The conversion matrix (_PBRT_TO_BLENDER) is baked into every object's
   world matrix so the result is independent of parenting.
-
-  For object transforms the full chain is:
-      blender_world = PBRT_TO_BLENDER @ pbrt_world @ scale
-  For the camera an extra 180° Y-flip is appended because pbrt cameras look
-  down +Z while Blender cameras look down -Z.
 """
 
 import os
@@ -51,11 +45,8 @@ from mathutils import Matrix
 # Coordinate-system constants
 # ---------------------------------------------------------------------------
 
-# pbrt Y-up → Blender Z-up  (applied to every world matrix)
 _PBRT_TO_BLENDER = Matrix.Rotation(math.radians(90), 4, 'X')
-
-# pbrt camera looks down +Z; Blender camera looks down -Z
-_CAM_FLIP = Matrix.Rotation(math.radians(180), 4, 'Y')
+_CAM_FLIP        = Matrix.Rotation(math.radians(180), 4, 'Y')
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +54,6 @@ _CAM_FLIP = Matrix.Rotation(math.radians(180), 4, 'Y')
 # ---------------------------------------------------------------------------
 
 def _pbrt_mat_to_blender(m16):
-    """Convert a pbrt column-major 16-float list to a Blender ``Matrix``."""
     rows = [[m16[row + col*4] for col in range(4)] for row in range(4)]
     return Matrix(rows)
 
@@ -90,26 +80,31 @@ def _new_object(name, data, collection):
 # Material helpers
 # ---------------------------------------------------------------------------
 
-def _get_or_create_material(mat_name):
+def _get_or_create_material(mat_key, mat_def, textures, base_dir):
     """
-    Return a material named *mat_name*, creating it (with a default
-    Principled BSDF) if it does not yet exist.  Returns ``None`` when
-    *mat_name* is empty.
+    Return a ``bpy.data.material`` for *mat_key*, creating and configuring it
+    if it does not yet exist.  Returns ``None`` when *mat_key* is empty.
     """
-    if not mat_name:
+    if not mat_key:
         return None
-    if mat_name in bpy.data.materials:
-        return bpy.data.materials[mat_name]
-    mat = bpy.data.materials.new(name=mat_name)
-    mat.use_nodes = True   # default tree = Principled BSDF + Material Output
+    if mat_key in bpy.data.materials:
+        return bpy.data.materials[mat_key]
+
+    mat = bpy.data.materials.new(name=mat_key)
+    mat.use_nodes = True
+
+    if mat_def is not None:
+        import pbrt_materials as pm
+        pm.apply_material(mat, mat_def, textures, base_dir)
+
     return mat
 
 
-def _assign_material(obj, mat_name):
-    """Assign *mat_name* to *obj*'s first material slot."""
+def _assign_material(obj, mat_key, mat_def, textures, base_dir):
+    """Assign material to *obj*'s first material slot."""
     if obj is None or obj.type != 'MESH':
         return
-    mat = _get_or_create_material(mat_name)
+    mat = _get_or_create_material(mat_key, mat_def, textures, base_dir)
     if mat is None:
         return
     if obj.data.materials:
@@ -185,24 +180,23 @@ def _import_plymesh(params, name, base_dir, collection):
 # Shape dispatcher
 # ---------------------------------------------------------------------------
 
-def _shape_to_object(shape_node, idx, base_dir, collection, correction):
-    """
-    Convert one ShapeNode to a Blender object.
-
-    *correction* is the pre-composed  PBRT_TO_BLENDER @ scale  matrix that is
-    left-multiplied onto every pbrt world matrix so objects land in the right
-    place with the right orientation and size.
-    """
+def _shape_to_object(shape_node, idx, base_dir, collection, correction,
+                     scene_data):
     st       = shape_node.shape_type
     name     = f"{st}_{idx:04d}"
     world    = correction @ _pbrt_mat_to_blender(shape_node.world_matrix)
-    mat_name = shape_node.material_name
+    mat_key  = shape_node.material_key
+    mat_def  = scene_data.materials.get(mat_key)
+
+    def _assign(obj):
+        _assign_material(obj, mat_key, mat_def,
+                         scene_data.textures, base_dir)
 
     if st == 'plymesh':
         obj = _import_plymesh(shape_node.params, name, base_dir, collection)
         if obj:
             obj.matrix_world = world
-            _assign_material(obj, mat_name)
+            _assign(obj)
         return obj
 
     if st in ('trianglemesh', 'loopsubdiv'):
@@ -211,7 +205,7 @@ def _shape_to_object(shape_node, idx, base_dir, collection, correction):
             return None
         obj = _new_object(name, me, collection)
         obj.matrix_world = world
-        _assign_material(obj, mat_name)
+        _assign(obj)
         if st == 'loopsubdiv':
             levels = int(shape_node.params.get('levels', [2])[0])
             mod = obj.modifiers.new('Subdivision', 'SUBSURF')
@@ -221,13 +215,13 @@ def _shape_to_object(shape_node, idx, base_dir, collection, correction):
     if st == 'sphere':
         obj = _new_object(name, _build_sphere(shape_node.params, name), collection)
         obj.matrix_world = world
-        _assign_material(obj, mat_name)
+        _assign(obj)
         return obj
 
     if st == 'disk':
         obj = _new_object(name, _build_disk(shape_node.params, name), collection)
         obj.matrix_world = world
-        _assign_material(obj, mat_name)
+        _assign(obj)
         return obj
 
     print(f"[pbrt_builder] Unsupported shape type: {st}")
@@ -323,13 +317,13 @@ def build_scene(scene_data, base_dir, import_name="pbrt_import", global_scale=1.
     for obj_name, obj_def in scene_data.objects.items():
         ocol = _ensure_collection(obj_name.replace(' ', '_'), defs_col)
         for i, shape in enumerate(obj_def.shapes):
-            _shape_to_object(shape, i, base_dir, ocol, correction)
+            _shape_to_object(shape, i, base_dir, ocol, correction, scene_data)
         obj_collections[obj_name] = ocol
 
     # Top-level shapes
     shapes_col = _ensure_collection(import_name + "_shapes", root_col)
     for i, shape in enumerate(scene_data.shapes):
-        _shape_to_object(shape, i, base_dir, shapes_col, correction)
+        _shape_to_object(shape, i, base_dir, shapes_col, correction, scene_data)
 
     # ObjectInstance → collection-instance empties
     inst_col = _ensure_collection(import_name + "_instances", root_col)

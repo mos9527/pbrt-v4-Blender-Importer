@@ -24,8 +24,27 @@ Features
 - `ObjectInstance` → Empty with `instance_type = 'COLLECTION'`
 
 **Materials**
-- `Material`, `MakeNamedMaterial`, `NamedMaterial` — material *names* are preserved
-- Each unique name becomes one Blender material with a default Principled BSDF, ready for manual editing
+
+All 8 pbrt v4 built-in material types are translated to a Principled BSDF:
+
+| pbrt type | Principled BSDF mapping |
+|---|---|
+| `diffuse` | Base Color, Roughness = 1 |
+| `coateddiffuse` | + Coat Weight / Roughness / IOR |
+| `conductor` | Metallic = 1, IOR from preset table or SPD average |
+| `coatedconductor` | conductor base + Coat layer |
+| `dielectric` | Transmission Weight = 1, IOR |
+| `thindielectric` | same as dielectric |
+| `subsurface` | Subsurface Weight + Radius |
+| `diffusetransmission` | Transmission Weight (approximate) |
+
+Named conductors (`Au`, `Ag`, `Al`, `Cu`, …) and glass grades (`glass-BK7`, …)
+are resolved from a built-in IOR table without needing the SPD files.
+`imagemap` textures are wired to the appropriate socket via an Image Texture node.
+
+`MakeNamedMaterial` / `NamedMaterial` are fully supported; the material name
+is used as the Blender material name so shared materials produce a single
+data-block.
 
 **Camera**
 - `perspective` camera with FOV, optional depth-of-field
@@ -34,7 +53,7 @@ Features
 - Camera set as the active scene camera
 
 **Coordinate system**
-- pbrt (right-hand, Y-up) → Blender (right-hand, Z-up) via a root empty with a 90° X-rotation
+- pbrt (right-hand, Y-up) → Blender (right-hand, Z-up), baked into every object matrix
 
 Installation
 ---
