@@ -31,8 +31,13 @@ Camera
 Coordinate system
 -----------------
   pbrt uses a right-handed, Y-up system; Blender uses right-handed, Z-up.
-  The root collection empty carries a 90° X-rotation so all child objects
-  are correctly oriented without baking the correction into every matrix.
+  The conversion matrix (_PBRT_TO_BLENDER) is baked into every object's
+  world matrix so the result is independent of parenting.
+
+  For object transforms the full chain is:
+      blender_world = PBRT_TO_BLENDER @ pbrt_world @ scale
+  For the camera an extra 180° Y-flip is appended because pbrt cameras look
+  down +Z while Blender cameras look down -Z.
 """
 
 import os
@@ -46,7 +51,7 @@ from mathutils import Matrix
 # Coordinate-system constants
 # ---------------------------------------------------------------------------
 
-# pbrt Y-up → Blender Z-up
+# pbrt Y-up → Blender Z-up  (applied to every world matrix)
 _PBRT_TO_BLENDER = Matrix.Rotation(math.radians(90), 4, 'X')
 
 # pbrt camera looks down +Z; Blender camera looks down -Z
@@ -180,10 +185,17 @@ def _import_plymesh(params, name, base_dir, collection):
 # Shape dispatcher
 # ---------------------------------------------------------------------------
 
-def _shape_to_object(shape_node, idx, base_dir, collection):
+def _shape_to_object(shape_node, idx, base_dir, collection, correction):
+    """
+    Convert one ShapeNode to a Blender object.
+
+    *correction* is the pre-composed  PBRT_TO_BLENDER @ scale  matrix that is
+    left-multiplied onto every pbrt world matrix so objects land in the right
+    place with the right orientation and size.
+    """
     st       = shape_node.shape_type
     name     = f"{st}_{idx:04d}"
-    world    = _pbrt_mat_to_blender(shape_node.world_matrix)
+    world    = correction @ _pbrt_mat_to_blender(shape_node.world_matrix)
     mat_name = shape_node.material_name
 
     if st == 'plymesh':
@@ -249,7 +261,7 @@ def _fov_to_angle_y(fov_deg, fov_axis, xres, yres):
     return fov
 
 
-def _build_camera(cam_data, import_name, root_col):
+def _build_camera(cam_data, import_name, root_col, correction):
     xres = cam_data['xresolution']
     yres = cam_data['yresolution']
 
@@ -264,11 +276,13 @@ def _build_camera(cam_data, import_name, root_col):
 
     if cam_data['lensradius'] > 0:
         cam.dof.use_dof        = True
-        cam.dof.focus_distance = cam_data['focaldistance']
+        # Scale focus distance by the same factor as scene geometry
+        scale = correction.to_scale()[0]   # uniform scale — all axes equal
+        cam.dof.focus_distance = cam_data['focaldistance'] * scale
 
     obj = _new_object(cam_name, cam, root_col)
-    # pbrt CTM is camera-to-world; apply Y-up→Z-up then flip camera forward axis
-    obj.matrix_world = _PBRT_TO_BLENDER @ _pbrt_mat_to_blender(cam_data['ctm']) @ _CAM_FLIP
+    # pbrt CTM is camera-to-world; apply coord correction then flip forward axis
+    obj.matrix_world = correction @ _pbrt_mat_to_blender(cam_data['ctm']) @ _CAM_FLIP
 
     scene = bpy.context.scene
     scene.render.resolution_x = xres
@@ -282,22 +296,23 @@ def _build_camera(cam_data, import_name, root_col):
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def build_scene(scene_data, base_dir, import_name="pbrt_import"):
+def build_scene(scene_data, base_dir, import_name="pbrt_import", global_scale=1.0):
     """
     Build Blender objects from *scene_data*.
 
     Parameters
     ----------
-    scene_data  : pbrt_parser.SceneData
-    base_dir    : str  — directory of the top-level .pbrt file
-    import_name : str  — name prefix for all created data-blocks
+    scene_data   : pbrt_parser.SceneData
+    base_dir     : str   — directory of the top-level .pbrt file
+    import_name  : str   — name prefix for all created data-blocks
+    global_scale : float — uniform scale applied to every world matrix
+                           (e.g. 0.01 for cm→m, 0.001 for mm→m)
     """
-    root_col = _ensure_collection(import_name, bpy.context.scene.collection)
+    # Pre-compose: coordinate-system flip + uniform scale
+    # Applied as:  blender_world = correction @ pbrt_world
+    correction = _PBRT_TO_BLENDER @ Matrix.Scale(global_scale, 4)
 
-    # Root empty carries the Y-up → Z-up correction for the whole import
-    root_empty = bpy.data.objects.new(import_name + "_root", None)
-    root_empty.matrix_world = _PBRT_TO_BLENDER
-    root_col.objects.link(root_empty)
+    root_col = _ensure_collection(import_name, bpy.context.scene.collection)
 
     # ObjectBegin prototypes → hidden collections
     defs_col = _ensure_collection(import_name + "_defs", root_col)
@@ -308,13 +323,13 @@ def build_scene(scene_data, base_dir, import_name="pbrt_import"):
     for obj_name, obj_def in scene_data.objects.items():
         ocol = _ensure_collection(obj_name.replace(' ', '_'), defs_col)
         for i, shape in enumerate(obj_def.shapes):
-            _shape_to_object(shape, i, base_dir, ocol)
+            _shape_to_object(shape, i, base_dir, ocol, correction)
         obj_collections[obj_name] = ocol
 
     # Top-level shapes
     shapes_col = _ensure_collection(import_name + "_shapes", root_col)
     for i, shape in enumerate(scene_data.shapes):
-        _shape_to_object(shape, i, base_dir, shapes_col)
+        _shape_to_object(shape, i, base_dir, shapes_col, correction)
 
     # ObjectInstance → collection-instance empties
     inst_col = _ensure_collection(import_name + "_instances", root_col)
@@ -328,14 +343,15 @@ def build_scene(scene_data, base_dir, import_name="pbrt_import"):
         empty.empty_display_type  = 'PLAIN_AXES'
         empty.instance_type       = 'COLLECTION'
         empty.instance_collection = ocol
-        empty.matrix_world        = _pbrt_mat_to_blender(inst.world_matrix)
+        empty.matrix_world        = correction @ _pbrt_mat_to_blender(inst.world_matrix)
         inst_col.objects.link(empty)
 
     # Camera
     if scene_data.camera:
-        _build_camera(scene_data.camera, import_name, root_col)
+        _build_camera(scene_data.camera, import_name, root_col, correction)
 
     print(f"[pbrt_builder] Done — "
           f"{len(scene_data.shapes)} shapes, "
           f"{len(scene_data.objects)} object defs, "
-          f"{len(scene_data.instances)} instances.")
+          f"{len(scene_data.instances)} instances, "
+          f"scale={global_scale}.")

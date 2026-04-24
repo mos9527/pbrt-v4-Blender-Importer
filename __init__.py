@@ -25,7 +25,7 @@ import sys
 import importlib
 
 import bpy
-from bpy.props import StringProperty, BoolProperty
+from bpy.props import StringProperty, BoolProperty, FloatProperty
 from bpy_extras.io_utils import ImportHelper
 
 # Ensure sibling modules are importable when loaded as a Blender addon
@@ -53,6 +53,19 @@ class IMPORT_OT_pbrt(bpy.types.Operator, ImportHelper):
         name="Use filename as collection name",
         description="Name the root collection after the imported file",
         default=True,
+    )
+
+    global_scale: FloatProperty(
+        name="Scale",
+        description=(
+            "Uniform scale applied to the entire scene on import. "
+            "pbrt has no built-in unit system; use this to match your scene. "
+            "Common values: 0.01 (cm → m), 0.001 (mm → m), 1.0 (keep as-is)"
+        ),
+        default=1.0,
+        min=1e-6,
+        soft_min=0.001,
+        soft_max=100.0,
     )
 
     def execute(self, context):
@@ -84,7 +97,8 @@ class IMPORT_OT_pbrt(bpy.types.Operator, ImportHelper):
             f"{len(scene_data.objects)} object defs, "
             f"{len(scene_data.instances)} instances …")
         try:
-            bb.build_scene(scene_data, os.path.dirname(filepath), import_name)
+            bb.build_scene(scene_data, os.path.dirname(filepath), import_name,
+                           global_scale=self.global_scale)
         except Exception as e:
             self.report({'ERROR'}, f"Build error: {e}")
             import traceback; traceback.print_exc()
