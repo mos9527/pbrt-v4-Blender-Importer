@@ -54,9 +54,6 @@ _CAM_FLIP        = Matrix.Rotation(math.radians(180), 4, 'Y')
 # ---------------------------------------------------------------------------
 
 def _pbrt_mat_to_blender(m16):
-    # m16 is stored column-major (as built by pbrt_parser matrix helpers).
-    # Mathutils Matrix([[row0],[row1],...]) is row-major, so we transpose:
-    # element at blender row r, col c  =  m16[r + c*4]
     rows = [[m16[row + col*4] for col in range(4)] for row in range(4)]
     return Matrix(rows)
 
