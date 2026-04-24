@@ -207,6 +207,29 @@ def _set_input(bsdf, socket_name, value):
         bsdf.inputs[socket_name].default_value = value
 
 
+def _float_param(params, key, default=0.0):
+    """
+    Safely extract a float from *params[key]*.
+
+    Returns *default* if the key is missing **or** if the value is a
+    texture-reference string (which will be wired separately).
+    """
+    v = params.get(key)
+    if v is None:
+        return default
+    if isinstance(v, list):
+        if not v:
+            return default
+        try:
+            return float(v[0])
+        except (TypeError, ValueError):
+            return default      # texture ref string — handled elsewhere
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def _connect_image_texture(mat, bsdf, socket_name, filepath,
                            colorspace='sRGB', is_float=False):
     """
@@ -281,17 +304,19 @@ def _apply_diffuse(mat, bsdf, params, textures, base_dir):
 
 def _apply_coateddiffuse(mat, bsdf, params, textures, base_dir):
     _apply_diffuse(mat, bsdf, params, textures, base_dir)
-    roughness = params.get('roughness', [0.5])[0]
+    roughness = _float_param(params, 'roughness', 0.5)
     bsdf.inputs['Roughness'].default_value = roughness
+    # Try wiring roughness texture too
+    _wire_texture_param(mat, bsdf, 'Roughness', params.get('roughness'),
+                        textures, base_dir, is_float=True)
     _set_input(bsdf, 'Coat Weight',    1.0)
     _set_input(bsdf, 'Coat Roughness', roughness)
-    eta = params.get('eta', [1.5])[0]
-    _set_input(bsdf, 'Coat IOR',       float(eta))
+    _set_input(bsdf, 'Coat IOR',       _float_param(params, 'eta', 1.5))
 
 
 def _apply_conductor(mat, bsdf, params, textures, base_dir):
     bsdf.inputs['Metallic'].default_value  = 1.0
-    bsdf.inputs['Roughness'].default_value = params.get('roughness', [0.01])[0]
+    bsdf.inputs['Roughness'].default_value = _float_param(params, 'roughness', 0.01)
 
     eta_spec = params.get('eta')
     k_spec   = params.get('k')
@@ -316,13 +341,14 @@ def _apply_conductor(mat, bsdf, params, textures, base_dir):
 
     rgb = params.get('reflectance') or params.get('albedo')
     if rgb and len(rgb) >= 3:
-        _set_input(bsdf, 'Base Color', (*rgb[:3], 1.0))
+        try:
+            _set_input(bsdf, 'Base Color', (float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0))
+        except (TypeError, ValueError):
+            pass
 
-    # Roughness texture (if the roughness param is a texture reference string)
-    rough_val = params.get('roughness')
-    if isinstance(rough_val, list) and rough_val and isinstance(rough_val[0], str):
-        _wire_texture_param(mat, bsdf, 'Roughness', rough_val,
-                            textures, base_dir, is_float=True)
+    # Roughness texture
+    _wire_texture_param(mat, bsdf, 'Roughness', params.get('roughness'),
+                        textures, base_dir, is_float=True)
 
 
 def _apply_coatedconductor(mat, bsdf, params, textures, base_dir):
@@ -336,19 +362,15 @@ def _apply_coatedconductor(mat, bsdf, params, textures, base_dir):
     _apply_conductor(mat, bsdf, conductor_params, textures, base_dir)
 
     _set_input(bsdf, 'Coat Weight',    1.0)
-    irough = params.get('interface.roughness', [0.0])[0]
-    _set_input(bsdf, 'Coat Roughness', float(irough))
-    ieta   = params.get('eta', [1.5])
-    _set_input(bsdf, 'Coat IOR',       _resolve_glass_ior(ieta))
+    _set_input(bsdf, 'Coat Roughness', _float_param(params, 'interface.roughness', 0.0))
+    _set_input(bsdf, 'Coat IOR',       _resolve_glass_ior(params.get('eta', [1.5])))
 
 
 def _apply_dielectric(mat, bsdf, params, textures, base_dir):
     _set_input(bsdf, 'Metallic',            0.0)
     _set_input(bsdf, 'Transmission Weight', 1.0)
-    roughness = params.get('roughness', [0.0])[0]
-    _set_input(bsdf, 'Roughness', float(roughness))
-    eta = _resolve_glass_ior(params.get('eta', [1.5]))
-    _set_input(bsdf, 'IOR', eta)
+    _set_input(bsdf, 'Roughness', _float_param(params, 'roughness', 0.0))
+    _set_input(bsdf, 'IOR', _resolve_glass_ior(params.get('eta', [1.5])))
 
 
 def _apply_thindielectric(mat, bsdf, params, textures, base_dir):
@@ -359,15 +381,21 @@ def _apply_subsurface(mat, bsdf, params, textures, base_dir):
     _set_input(bsdf, 'Subsurface Weight', 1.0)
     mfp = params.get('mfp')
     if mfp and len(mfp) >= 3:
-        _set_input(bsdf, 'Subsurface Radius', (*mfp[:3],))
-    roughness = params.get('uroughness') or params.get('roughness')
-    if roughness:
-        _set_input(bsdf, 'Roughness', float(roughness[0]))
-    eta = params.get('eta', [1.3])
-    _set_input(bsdf, 'IOR', _resolve_glass_ior(eta))
+        try:
+            _set_input(bsdf, 'Subsurface Radius',
+                       (float(mfp[0]), float(mfp[1]), float(mfp[2])))
+        except (TypeError, ValueError):
+            pass
+    r = _float_param(params, 'uroughness') or _float_param(params, 'roughness')
+    if r:
+        _set_input(bsdf, 'Roughness', r)
+    _set_input(bsdf, 'IOR', _resolve_glass_ior(params.get('eta', [1.3])))
     rgb = params.get('reflectance')
     if rgb and len(rgb) >= 3:
-        _set_input(bsdf, 'Base Color', (*rgb[:3], 1.0))
+        try:
+            _set_input(bsdf, 'Base Color', (float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0))
+        except (TypeError, ValueError):
+            pass
 
 
 def _apply_diffusetransmission(mat, bsdf, params, textures, base_dir):
@@ -375,15 +403,21 @@ def _apply_diffusetransmission(mat, bsdf, params, textures, base_dir):
     trans = params.get('transmittance')
     refl  = params.get('reflectance')
     if trans and len(trans) >= 3:
-        lum = 0.2126*trans[0] + 0.7152*trans[1] + 0.0722*trans[2]
-        _set_input(bsdf, 'Transmission Weight', min(lum, 1.0))
-        _set_input(bsdf, 'Base Color', (*trans[:3], 1.0))
+        try:
+            lum = 0.2126*float(trans[0]) + 0.7152*float(trans[1]) + 0.0722*float(trans[2])
+            _set_input(bsdf, 'Transmission Weight', min(lum, 1.0))
+            _set_input(bsdf, 'Base Color', (float(trans[0]), float(trans[1]), float(trans[2]), 1.0))
+        except (TypeError, ValueError):
+            pass
     elif refl and len(refl) >= 3:
-        _set_input(bsdf, 'Base Color', (*refl[:3], 1.0))
+        try:
+            _set_input(bsdf, 'Base Color', (float(refl[0]), float(refl[1]), float(refl[2]), 1.0))
+        except (TypeError, ValueError):
+            pass
 
 
 def _apply_hair(mat, bsdf, params, textures, base_dir):
-    bsdf.inputs['Roughness'].default_value = params.get('beta_m', [0.3])[0]
+    bsdf.inputs['Roughness'].default_value = _float_param(params, 'beta_m', 0.3)
     rgb = params.get('color') or params.get('reflectance')
     if rgb and len(rgb) >= 3:
         _set_input(bsdf, 'Base Color', (*rgb[:3], 1.0))
