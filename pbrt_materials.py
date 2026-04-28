@@ -230,6 +230,26 @@ def _float_param(params, key, default=0.0):
         return default
 
 
+def _as_param_list(value):
+    """Normalize parser values that may be stored as scalars or lists."""
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return []
+    return [value]
+
+
+def _rgb_param(value):
+    """Return an RGB tuple when *value* is numeric, otherwise None."""
+    values = _as_param_list(value)
+    if len(values) < 3:
+        return None
+    try:
+        return (float(values[0]), float(values[1]), float(values[2]))
+    except (TypeError, ValueError):
+        return None
+
+
 def _connect_image_texture(mat, bsdf, socket_name, filepath,
                            colorspace='sRGB', is_float=False):
     """
@@ -263,9 +283,10 @@ def _wire_texture_param(mat, bsdf, socket_name, param_value,
     If *param_value* is a texture reference, connect an Image Texture node.
     Returns True if a texture was connected.
     """
-    if not isinstance(param_value, list) or not param_value:
+    values = _as_param_list(param_value)
+    if not values:
         return False
-    ref = param_value[0]
+    ref = values[0]
     if not isinstance(ref, str):
         return False
     tex_def = textures.get(ref)
@@ -297,9 +318,9 @@ def _apply_diffuse(mat, bsdf, params, textures, base_dir):
     if not _wire_texture_param(mat, bsdf, 'Base Color',
                                params.get('reflectance'),
                                textures, base_dir):
-        rgb = params.get('reflectance')
-        if rgb and len(rgb) >= 3:
-            _set_input(bsdf, 'Base Color', (*rgb[:3], 1.0))
+        rgb = _rgb_param(params.get('reflectance'))
+        if rgb is not None:
+            _set_input(bsdf, 'Base Color', (*rgb, 1.0))
 
 
 def _apply_coateddiffuse(mat, bsdf, params, textures, base_dir):
@@ -339,12 +360,9 @@ def _apply_conductor(mat, bsdf, params, textures, base_dir):
     eta, k = _resolve_conductor_ior(eta_spec, k_spec)
     _set_input(bsdf, 'IOR', eta)
 
-    rgb = params.get('reflectance') or params.get('albedo')
-    if rgb and len(rgb) >= 3:
-        try:
-            _set_input(bsdf, 'Base Color', (float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0))
-        except (TypeError, ValueError):
-            pass
+    rgb = _rgb_param(params.get('reflectance') or params.get('albedo'))
+    if rgb is not None:
+        _set_input(bsdf, 'Base Color', (*rgb, 1.0))
 
     # Roughness texture
     _wire_texture_param(mat, bsdf, 'Roughness', params.get('roughness'),
@@ -390,37 +408,30 @@ def _apply_subsurface(mat, bsdf, params, textures, base_dir):
     if r:
         _set_input(bsdf, 'Roughness', r)
     _set_input(bsdf, 'IOR', _resolve_glass_ior(params.get('eta', [1.3])))
-    rgb = params.get('reflectance')
-    if rgb and len(rgb) >= 3:
-        try:
-            _set_input(bsdf, 'Base Color', (float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0))
-        except (TypeError, ValueError):
-            pass
+    rgb = _rgb_param(params.get('reflectance'))
+    if rgb is not None:
+        _set_input(bsdf, 'Base Color', (*rgb, 1.0))
 
 
 def _apply_diffusetransmission(mat, bsdf, params, textures, base_dir):
     bsdf.inputs['Roughness'].default_value = 1.0
     trans = params.get('transmittance')
     refl  = params.get('reflectance')
-    if trans and len(trans) >= 3:
-        try:
-            lum = 0.2126*float(trans[0]) + 0.7152*float(trans[1]) + 0.0722*float(trans[2])
-            _set_input(bsdf, 'Transmission Weight', min(lum, 1.0))
-            _set_input(bsdf, 'Base Color', (float(trans[0]), float(trans[1]), float(trans[2]), 1.0))
-        except (TypeError, ValueError):
-            pass
-    elif refl and len(refl) >= 3:
-        try:
-            _set_input(bsdf, 'Base Color', (float(refl[0]), float(refl[1]), float(refl[2]), 1.0))
-        except (TypeError, ValueError):
-            pass
+    trans_rgb = _rgb_param(trans)
+    refl_rgb = _rgb_param(refl)
+    if trans_rgb is not None:
+        lum = 0.2126*trans_rgb[0] + 0.7152*trans_rgb[1] + 0.0722*trans_rgb[2]
+        _set_input(bsdf, 'Transmission Weight', min(lum, 1.0))
+        _set_input(bsdf, 'Base Color', (*trans_rgb, 1.0))
+    elif refl_rgb is not None:
+        _set_input(bsdf, 'Base Color', (*refl_rgb, 1.0))
 
 
 def _apply_hair(mat, bsdf, params, textures, base_dir):
     bsdf.inputs['Roughness'].default_value = _float_param(params, 'beta_m', 0.3)
-    rgb = params.get('color') or params.get('reflectance')
-    if rgb and len(rgb) >= 3:
-        _set_input(bsdf, 'Base Color', (*rgb[:3], 1.0))
+    rgb = _rgb_param(params.get('color') or params.get('reflectance'))
+    if rgb is not None:
+        _set_input(bsdf, 'Base Color', (*rgb, 1.0))
 
 
 # ---------------------------------------------------------------------------
