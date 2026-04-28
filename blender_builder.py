@@ -36,6 +36,7 @@ Coordinate system
 
 import os
 import math
+import struct
 import bpy
 import bmesh
 from mathutils import Matrix
@@ -219,6 +220,108 @@ def _build_disk(params, name):
     return me
 
 
+def _read_ply_vertex_uvs(filepath):
+    """
+    Read vertex-level u/v properties from simple PBRT PLY files.
+
+    Blender's PLY importer may ignore these properties even though pbrt's
+    plymesh uses them as texture coordinates.
+    """
+    try:
+        with open(filepath, 'rb') as f:
+            data = f.read()
+    except OSError:
+        return None
+
+    marker = b'end_header'
+    header_end = data.find(marker)
+    if header_end < 0:
+        return None
+    body_start = header_end + len(marker)
+    while body_start < len(data) and data[body_start] in (10, 13):
+        body_start += 1
+
+    header = data[:header_end].decode('ascii', errors='replace').splitlines()
+    fmt = None
+    vertex_count = 0
+    vertex_props = []
+    element = None
+    for line in header:
+        parts = line.split()
+        if not parts:
+            continue
+        if parts[0] == 'format' and len(parts) >= 2:
+            fmt = parts[1]
+        elif parts[0] == 'element' and len(parts) >= 3:
+            element = parts[1]
+            if element == 'vertex':
+                vertex_count = int(parts[2])
+        elif parts[0] == 'property' and element == 'vertex' and len(parts) >= 3:
+            if parts[1] == 'list':
+                return None
+            vertex_props.append((parts[1], parts[2]))
+
+    prop_names = [name for _, name in vertex_props]
+    if 'u' not in prop_names or 'v' not in prop_names:
+        return None
+
+    if fmt == 'ascii':
+        text = data[body_start:].decode('ascii', errors='replace').splitlines()
+        u_index = prop_names.index('u')
+        v_index = prop_names.index('v')
+        uvs = []
+        for line in text[:vertex_count]:
+            values = line.split()
+            if len(values) <= max(u_index, v_index):
+                return None
+            uvs.append((float(values[u_index]), float(values[v_index])))
+        return uvs
+
+    endian = '<' if fmt == 'binary_little_endian' else '>' if fmt == 'binary_big_endian' else None
+    if endian is None:
+        return None
+
+    type_codes = {
+        'char': 'b', 'int8': 'b',
+        'uchar': 'B', 'uint8': 'B',
+        'short': 'h', 'int16': 'h',
+        'ushort': 'H', 'uint16': 'H',
+        'int': 'i', 'int32': 'i',
+        'uint': 'I', 'uint32': 'I',
+        'float': 'f', 'float32': 'f',
+        'double': 'd', 'float64': 'd',
+    }
+    try:
+        row_struct = struct.Struct(endian + ''.join(type_codes[t] for t, _ in vertex_props))
+    except KeyError:
+        return None
+
+    u_index = prop_names.index('u')
+    v_index = prop_names.index('v')
+    offset = body_start
+    uvs = []
+    for _ in range(vertex_count):
+        row = row_struct.unpack_from(data, offset)
+        offset += row_struct.size
+        uvs.append((float(row[u_index]), float(row[v_index])))
+    return uvs
+
+
+def _add_vertex_uvs(obj, filepath):
+    """Create a UV layer from vertex u/v PLY properties when Blender skipped it."""
+    if obj is None or obj.type != 'MESH' or obj.data.uv_layers:
+        return
+    uvs = _read_ply_vertex_uvs(filepath)
+    if not uvs:
+        return
+    me = obj.data
+    if len(uvs) < len(me.vertices):
+        return
+    uv_layer = me.uv_layers.new(name='UVMap')
+    for loop in me.loops:
+        uv_layer.data[loop.index].uv = uvs[loop.vertex_index]
+
+
 def _import_plymesh(params, name, base_dir, collection):
     fn_list = params.get('filename', [])
     if not fn_list:
@@ -240,6 +343,7 @@ def _import_plymesh(params, name, base_dir, collection):
 
     obj = imported[0]
     obj.name = name
+    _add_vertex_uvs(obj, fpath)
     for col in list(obj.users_collection):
         col.objects.unlink(obj)
     collection.objects.link(obj)
